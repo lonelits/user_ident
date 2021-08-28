@@ -1,2 +1,6 @@
 user_identification_exps/
-.ipynb_checkpoints/
+*.ipynb_checkpoints/
+features_selector_log/
+pipeline_exps.ipynb
+__pycache__/
+kaggle_answers/

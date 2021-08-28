@@ -46,54 +46,65 @@ class FeaturesSelector:
         pipeline = create_pipeline(blocks, to_selector=True)
         self.data = pipeline.fit_transform(X)
         cat_names = []
-        for feat in features_list['categorical_feats']:
-            num = X[feat].value_counts().shape[0]
-            cat_names.extend([feat + str(i) for i in range(1, num+1)])
+        categories = pipeline.steps[0][1].transformer_list[2][1].steps[1][1].categories_
+        for i, feat in enumerate(features_list['categorical_feats']):
+            if feat=='binned_start_hour':
+                cat_names.extend([feat + '_' + str(round(h.left)) for h in categories[i]])
+            else:
+                cat_names.extend([feat + '_' + str(el) for el in categories[i]])
         labels = features_list['binary_feats'] + cat_names + ['is_top_' + str(i) for i in range(1, 31)] +\
             features_list['numerical_feats']
+        self.labels = labels
         idxs = np.array([True]*len(labels))
-        scores = cross_val_score(model, self.data, y, cv=cv, scoring=scoring, n_jobs=-1)
+        scores = cross_val_score(model, self.data, y, cv=cv, scoring=scoring, n_jobs=-2)
         mean_score = scores.mean()
         delete = True
         self.report = pd.DataFrame({'feature': ['start'], 'operation': ['start'], scoring: [mean_score]})
         self.feat_values = pd.Series(0, index=labels)
-        report_file = 'report_' + time.strftime('%Y_%m_%d_%H_%M', time.localtime()) + '.csv'
+        
         if continue_last:
-            report_file = re.search('report\S*', glob(os.path.join(PATH_TO_FSLOG, 'report*'))[-1])[0]
-            self.report = pd.read_csv(os.path.join(PATH_TO_FSLOG, report_file), index_col=0)
-            self.feat_values = pd.read_csv(os.path.join(PATH_TO_FSLOG, 'values_' + report_file[7:]), index_col=0)
-            with open(os.path.join(PATH_TO_FSLOG, 'idxs.txt'), 'r') as f:
+            cur_dir = glob(os.path.join(PATH_TO_FSLOG, 'run*'))[-1]
+            cur_time = re.search('run\S*', cur_dir)[0][4:]
+            self.report = pd.read_csv(os.path.join(cur_dir, 'report_' + cur_time + '.csv'), index_col=0)
+            self.feat_values = pd.read_csv(os.path.join(cur_dir, 'values_' + cur_time + '.csv'), 
+                                           index_col=0, squeeze=True)
+            with open(os.path.join(cur_dir, 'idxs.txt'), 'r') as f:
                 idxs = np.array(f.read().split(' ')).astype(bool)[tfidf_number[0]:]
+        else:
+            cur_time = time.strftime('%Y_%m_%d_%H_%M', time.localtime())
+            cur_dir = os.path.join(PATH_TO_FSLOG, 'run_' + cur_time)
+            os.mkdir(cur_dir)
         for i in tqdm(range(n)):
-            if delete:
-                pos = np.random.choice(np.where(idxs==True)[0])
-                idxs[pos] = False
-            else:
-                pos = np.random.choice(np.where(idxs==False)[0])
-                idxs[pos] = True
+            if np.where(idxs==delete)[0].shape[0] == 0:
+                delete = not delete
+            pos = np.random.choice(np.where(idxs==delete)[0])
+            idxs[pos] = not delete
             inner_idxs = np.hstack((np.array([True]*tfidf_number[0]), idxs))
-            scores = cross_val_score(model, self.data[:, inner_idxs], y, cv=cv, scoring=scoring, n_jobs=-1)
+            scores = cross_val_score(model, self.data[:, inner_idxs], y, cv=cv, scoring=scoring, n_jobs=-2)
             new_score = scores.mean()
             self.report = self.report.append(pd.DataFrame({'feature': [labels[pos]], 
                                              'operation': ['delete' if delete is True else 'add'],
                                              scoring: [new_score]}), ignore_index=True)
-            self.report.to_csv(os.path.join(PATH_TO_FSLOG, report_file))
-            self.feat_values[labels[pos]] += (new_score - mean_score)*(2*delete - 1)
-            self.feat_values.to_csv(os.path.join(PATH_TO_FSLOG, 'values_'+report_file[7:]))
+            self.report.to_csv(os.path.join(cur_dir, 'report_' + cur_time + '.csv'))
+            add_coef = (new_score - mean_score)*(2*delete - 1)
+            print(add_coef)
+            self.feat_values.loc[labels[pos]] += add_coef
+            self.feat_values = self.feat_values.sort_values()
+            self.feat_values.to_csv(os.path.join(cur_dir, 'values_' + cur_time + '.csv'))
             if new_score < mean_score:
                 idxs[pos] = not idxs[pos]
                 delete = not delete
                 continue
             mean_score = new_score
-        self.best_score = mean_score
-        self.best_model = create_pipeline(model=model)
+        #self.best_score = mean_score
+        #self.best_model = create_pipeline(model=model)
         inner_idxs = np.hstack((np.array([True]*tfidf_number[0]), idxs))
-        with open(os.path.join(PATH_TO_FSLOG, 'idxs.txt'), 'w') as idxs_file:
+        with open(os.path.join(cur_dir, 'idxs.txt'), 'w') as idxs_file:
             idxs_file.write(' '.join(inner_idxs.astype(int).astype(str)))
-        self.best_model.set_params(features_filter=FunctionTransformer(lambda data: data[:, inner_idxs]))
-        with open(os.path.join(PATH_TO_FSLOG, 'best_model.pkl'), 'wb') as best_model_pkl:
-            dill.dump(self.best_model, best_model_pkl)
-        self.feat_values = self.feat_values.sort_values()
+        self.del_labels = np.array(labels)[np.invert(idxs)]
+        #self.best_model.set_params(features_filter=FunctionTransformer(lambda data: data[:, inner_idxs]))
+        #with open(os.path.join(cur_dir, 'best_model.pkl'), 'wb') as best_model_pkl:
+        #    dill.dump(self.best_model, best_model_pkl)
 
 def load_catch_me_data():
     
@@ -116,11 +127,7 @@ def load_catch_me_data():
     
     return train_data, test_data, user_id
 
-def create_pipeline(blocks=None, model=None, model_params=None, to_selector=None):
-    
-    if model is True:
-        model = XGBClassifier(tree_method='gpu_hist', predictor='gpu_predictor', use_label_encoder=False, verbosity=0,
-                              **model_params)
+def create_pipeline(blocks=None, model=None, to_selector=False):
     
     pipeline = Pipeline(steps=[
         ('feature_processing', FeatureUnion(transformer_list=[
@@ -150,7 +157,7 @@ def create_pipeline(blocks=None, model=None, model_params=None, to_selector=None
         ('classifier', model)
     ])
             
-    if to_selector is None:
+    if to_selector is False:
         pipeline.set_params(feature_processing__bag_of_sites__feats_counter=None)
         
     if blocks is None:
